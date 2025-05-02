@@ -1,0 +1,42 @@
+name: 'Run SonarQube Test Analysis'
+description: 'Run SonarQube Test Analysis'
+
+inputs:
+  sonarqube_wait_for_test_coverage:
+    default: false
+    description: "Boolean parameter which checks if we have to wait for test coverage data or not"
+  SONAR_TOKEN:
+    default: ''
+  SONAR_HOST_URL:
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Log Separator
+      run: |
+        echo "================================================= SONARQUBE ANALYSIS START ================================================="
+      shell: bash
+
+    - name: Reformatting lcov.info file
+      if: ${{ inputs.sonarqube_wait_for_test_coverage == 'true' }}
+      run: |
+        # Convert relative paths in the lcov.info file to relative paths
+        echo "Formatting .coverage/lcov.info file"
+        if [ -f ".coverage/lcov.info" ]; then
+          echo ".coverage/lcov.info file exists"
+          sed -i "s|SF:/home/runner/work/${{ github.event.repository.name }}/${{ github.event.repository.name }}/|SF:|g" .coverage/lcov.info
+        fi
+      shell: bash
+
+    - name: Running SonarQube Check
+      uses: sonarsource/sonarqube-scan-action@master
+      env:
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+
+    - name: Log Separator
+      run: |
+        echo "================================================== SONARQUBE ANALYSIS END =================================================="
+      shell: bash
+        

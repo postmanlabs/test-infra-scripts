@@ -1,0 +1,209 @@
+name: "Coverage Tracker & PR Commenter Workflow"
+description: "Send unit + integration related coverage related data to looker"
+
+inputs:
+  jobName:
+    default: "NA"
+  coverageType:
+    required: true
+  squad:
+    default: "NA"
+  sonarqube_check:
+    default: false
+    description: "Boolean parameter which checks if we have to run SonarQube Analysis or not"
+  sonarqube_wait_for_test_coverage:
+    default: true
+    description: "Boolean parameter which checks if we have to wait for test coverage data or not"
+  artifactSource:
+    required: true
+  QE_HEVO_WEBHOOK_URL:
+    required: true
+  QE_HEVO_ACCESS_KEY:
+    required: true
+  QE_HEVO_SECRET_KEY:
+    required: true
+  POSTMAN_NPM_TOKEN:
+    required: true
+  SONAR_TOKEN:
+    default: ""
+  SONAR_HOST_URL:
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-node@v3
+      with:
+        node-version: "18.9.0"
+    - name: Determine Commit SHA
+      run: |
+        if [ "${{ github.event_name }}" == "push" ]; then
+          echo "SHA=${{ github.sha }}" >> $GITHUB_ENV
+        elif [ "${{ github.event_name }}" == "pull_request" ]; then
+          echo "SHA=${{ github.event.pull_request.head.sha }}" >> $GITHUB_ENV
+        fi
+      shell: bash
+
+    - name: Running SonarQube Check
+      if: ${{ (success() || failure()) && inputs.sonarqube_check == 'true'  && inputs.sonarqube_wait_for_test_coverage == 'false' }}
+      uses: postmanlabs/test-infra-scripts/.github/actions/sonarqube-action@main
+      with:
+        sonarqube_wait_for_test_coverage: ${{ inputs.sonarqube_wait_for_test_coverage }}
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+
+    - name: Wait for Tests to complete
+      if: ${{ inputs.jobName != 'NA' }}
+      run: |
+        sleep 2
+        PR_CHECKS=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          /repos/${{env.GITHUB_REPOSITORY}}/commits/${{ env.SHA }}/check-runs | jq -c .check_runs)
+
+        CHECK_STATUS=""
+        CHECK_CONCLUSION=""
+        CHECK_ID=""
+
+        for check in $(echo $PR_CHECKS | jq -r '.[] | @base64'); do
+          CHECK_NAME=$(echo ${check} | base64 --decode | jq -r '.name')
+          CHECK_STATUS=$(echo ${check} | base64 --decode | jq -r '.status')
+          CHECK_CONCLUSION=$(echo ${check} | base64 --decode | jq -r '.conclusion')
+          if [ "$CHECK_NAME" == "${{ inputs.jobName }}" ];
+          then
+            CHECK_ID=$(echo ${check} | base64 --decode | jq -r '.id')
+            RUN_ID=$(echo ${check} | base64 --decode | jq -r '.html_url | split("/") | .[7]')
+            break
+          fi
+        done
+
+        if [ "$CHECK_ID" != "" ];
+        then
+          START_TIME=$(date "+%s")
+          CURRENT_TIME=$START_TIME
+          END_TIME=$((START_TIME+600))
+          while [ $CURRENT_TIME -le $END_TIME ] && [ "$CHECK_STATUS" != "completed" ]
+          do
+              CURRENT_TIME=$(date "+%s")
+              CHECK=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                /repos/${{env.GITHUB_REPOSITORY}}/check-runs/$CHECK_ID | jq -c .)
+              CHECK_STATUS=$(echo $CHECK | jq -r .status)
+              CHECK_CONCLUSION=$(echo $CHECK | jq -r .conclusion)
+              if [ "$CHECK_STATUS" != "completed" ];
+              then
+                  sleep 10
+              else
+                  break
+              fi
+          done
+        else
+          echo "*********************** ${{ inputs.jobName }} tests check ID not found ******************"
+          exit 0
+        fi
+
+        echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+        echo "CHECK_STATUS=$CHECK_STATUS" >> "$GITHUB_ENV"
+        echo "CHECK_CONCLUSION=$CHECK_CONCLUSION" >> "$GITHUB_ENV"
+      shell: bash
+
+    - name: Check if Tests completed successfully
+      if: ${{ inputs.jobName != 'NA' }}
+      run: |
+        if [[ "$CHECK_STATUS" == "completed" && "$CHECK_CONCLUSION" != "success" ]];
+        then
+          echo "Tests failed"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        elif [ "$CHECK_STATUS" != "completed" ];
+        then
+          echo "Tests taking too long"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        else
+          echo "Tests successful"
+          echo "success=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+      shell: bash
+
+    - name: ⬇️ Download coverage-summary.json from cache
+      uses: actions/cache/restore@v4
+      with:
+        key: coverage-summary-baseline-${{ inputs.coverageType }}
+        path: .coverage/coverage-summary.json
+
+    - name: ⬇️ Export Net Coverage from baseline coverage file
+      run: |
+        if [ -f .coverage/coverage-summary.json ]; then
+          NET_COVERAGE_BASELINE=$(jq '(.total.lines.pct + .total.statements.pct + .total.functions.pct + .total.branches.pct) / 4' .coverage/coverage-summary.json)
+        else
+          NET_COVERAGE_BASELINE=0
+        fi
+        echo "NET_COVERAGE_BASELINE=$NET_COVERAGE_BASELINE" >> "$GITHUB_ENV"
+        echo "Baseline Coverage: $NET_COVERAGE_BASELINE"
+      shell: bash
+
+    - name: Download Artifacts
+      run: |
+        gh run download ${{ env.RUN_ID}}
+        mv coverage-summary-${{ inputs.coverageType }}/coverage.txt .
+        mkdir -p .coverage && mv coverage-summary-${{ inputs.coverageType }}/.coverage/* .coverage/
+      shell: bash
+
+    - name: Running SonarQube Check
+      if: ${{ (success() || failure()) && inputs.sonarqube_check == 'true'  && inputs.sonarqube_wait_for_test_coverage == 'true' }}
+      uses: postmanlabs/test-infra-scripts/.github/actions/sonarqube-action@main
+      with:
+        sonarqube_wait_for_test_coverage: ${{ inputs.sonarqube_wait_for_test_coverage }}
+        SONAR_TOKEN: ${{ inputs.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
+
+    - name: 💬 Jest Coverage Comment
+      uses: postmanlabs/jest-coverage-comment@test-changed-files-in-coverage-comment
+      with:
+        title: ${{ inputs.coverageType }} test code coverage
+        coverage-summary-path: .coverage/coverage-summary.json
+        unique-id-for-comment: ${{ inputs.coverageType }}-test-coverage
+        coverage-title: Coverage Breakdown
+        coverage-path: coverage.txt
+        report-only-changed-files: true
+        netCoverageMain: ${{ env.NET_COVERAGE_BASELINE }}
+
+    - name: Get main branch name
+      run: |
+        MAIN_BRANCH_NAME=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
+        echo "Main branch: $MAIN_BRANCH_NAME"
+        echo "MAIN_BRANCH_NAME=$MAIN_BRANCH_NAME" >> "$GITHUB_ENV"
+        echo "Feature branch: ${{ github.ref }}"
+      shell: bash
+
+    - name: 🧹 Delete old cache
+      if: ${{ github.event_name == 'push' && github.ref_name == env.MAIN_BRANCH_NAME }}
+      run: |
+        curl -L \
+          -X DELETE \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ env.GH_TOKEN }}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${{env.GITHUB_REPOSITORY}}/actions/caches?key=coverage-summary-baseline-${{ inputs.coverageType }}"
+      shell: bash
+
+    - name: ⬆️ Upload coverage-summary.json into cache
+      if: ${{ github.event_name == 'push' && github.ref_name == env.MAIN_BRANCH_NAME }}
+      uses: actions/cache/save@v4
+      with:
+        key: coverage-summary-baseline-${{ inputs.coverageType }}
+        path: .coverage/coverage-summary.json
+
+    - name: 📨 Send ${{ inputs.coverageType }} test coverage to looker
+      env:
+        QE_HEVO_WEBHOOK_URL: ${{ inputs.QE_HEVO_WEBHOOK_URL }}
+        QE_HEVO_ACCESS_KEY: ${{ inputs.QE_HEVO_ACCESS_KEY }}
+        QE_HEVO_SECRET_KEY: ${{ inputs.QE_HEVO_SECRET_KEY }}
+      run: |
+        npm config set //registry.npmjs.org/:_authToken=${{ inputs.POSTMAN_NPM_TOKEN }};
+        npx @postman/server-side-test-coverage --squad=${{ inputs.squad }} --type=${{ inputs.coverageType }}
+      shell: bash
