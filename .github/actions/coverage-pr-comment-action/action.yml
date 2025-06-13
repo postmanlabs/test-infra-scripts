@@ -162,15 +162,13 @@ runs:
         SONAR_HOST_URL: ${{ inputs.SONAR_HOST_URL }}
 
     - name: 💬 Jest Coverage Comment
-      uses: postmanlabs/jest-coverage-comment@test-changed-files-in-coverage-comment
+      uses: MishaKav/jest-coverage-comment@main
       with:
         title: ${{ inputs.coverageType }} test code coverage
         coverage-summary-path: .coverage/coverage-summary.json
-        unique-id-for-comment: ${{ inputs.coverageType }}-test-coverage
         coverage-title: Coverage Breakdown
         coverage-path: coverage.txt
         report-only-changed-files: true
-        netCoverageMain: ${{ env.NET_COVERAGE_BASELINE }}
 
     - name: Get main branch name
       run: |
